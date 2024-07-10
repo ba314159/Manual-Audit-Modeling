@@ -1,0 +1,381 @@
+/***********************************************************************/
+/* create and populate calendar table                                  */
+/***********************************************************************/
+create or replace TABLE STRATEGICANALYTICS.PRODUCTCAPACITYANALYSIS.MA2_DATEDIM (
+	CALENDAR_DATE DATE,
+	DAY_OF_CALENDAR integer,
+	YEAR_OF_CALENDAR integer,
+	MONTH_OF_YEAR integer,
+	MONTH_NAME VARCHAR(3),
+	DAY_OF_MON integer,
+	DAY_OF_WEEK VARCHAR(9),
+	WEEK_OF_YEAR integer,
+	DAY_OF_YEAR integer,
+	WORK_DAY_FLAG integer,
+	US_HOLIDAY_FLAG integer
+);
+
+insert into STRATEGICANALYTICS.PRODUCTCAPACITYANALYSIS.MA2_DATEDIM
+WITH CTE_MY_DATE AS (  
+    SELECT DATEADD(DAY, SEQ4(), '2000-01-01') AS MY_DATE  
+      FROM TABLE(GENERATOR(ROWCOUNT=>10000))  -- Number of days after reference date in previous line  
+  ) , date_dim as ( 
+  SELECT MY_DATE as calendar_date -- Use built in Snowflake functions  
+    , ROW_NUMBER() OVER (ORDER BY MY_DATE) as day_of_calendar 
+    ,YEAR(MY_DATE) as year_of_calendar 
+    ,MONTH(MY_DATE) as month_of_year 
+    ,MONTHNAME(MY_DATE) as month_name 
+    ,DAY(MY_DATE) as day_of_month 
+    ,DAYOFWEEK(MY_DATE) + 1 as day_of_week 
+    ,WEEKOFYEAR(MY_DATE) as week_of_year 
+    ,DAYOFYEAR(MY_DATE) as day_of_year 
+    ,CASE WHEN DAYOFWEEK(MY_DATE) BETWEEN 1 AND 5 THEN 1 ELSE 0 END  as work_day_flag 
+    FROM CTE_MY_DATE  
+    )  
+    SELECT A.* ,   
+       CASE MONTH_OF_YEAR  
+            WHEN 1 THEN   
+               CASE WHEN DAY_OF_MONTH = 1 AND DAY_OF_WEEK BETWEEN 2 AND 6 THEN 0 -- NEW YEARS DAY WEEK DAY  
+                     WHEN DAY_OF_MONTH IN (2,3) AND DAY_OF_WEEK = 2 THEN 0 -- NEW YEARS DAY WEEK END  
+                    WHEN DAY_OF_WEEK = 2 AND DAY_OF_MONTH BETWEEN 15 AND 21 THEN 0 -- MLK DAY  
+                    ELSE 1 END  
+            WHEN 2 THEN   
+                CASE WHEN DAY_OF_WEEK = 2 AND DAY_OF_MONTH BETWEEN 15 AND 21 THEN 0 -- PRESIDENTS DAY  
+                    ELSE 1 END   
+            WHEN 5 THEN   
+                CASE WHEN DAY_OF_WEEK = 2 AND DAY_OF_MONTH BETWEEN 25 AND 31 THEN 0 -- MEMORIAL DAY  
+                    ELSE 1 END  
+            WHEN 6 THEN   
+                CASE WHEN YEAR_OF_CALENDAR >= 2021 AND DAY_OF_MONTH = 19 AND DAY_OF_WEEK BETWEEN 2 AND 6 THEN 0 -- JUNETEENTH  
+                    WHEN YEAR_OF_CALENDAR >= 2021 AND DAY_OF_MONTH = 20 AND DAY_OF_WEEK = 2 THEN 0 -- JUNETEENTH SUNDAY  
+                    WHEN YEAR_OF_CALENDAR >= 2021 AND DAY_OF_MONTH = 18 AND DAY_OF_WEEK = 6 THEN 0 -- JUNETEENTH SATURDAY  
+                    ELSE 1 END   
+            WHEN 7 THEN   
+                CASE WHEN DAY_OF_MONTH = 4 AND DAY_OF_WEEK BETWEEN 2 AND 6 THEN 0 -- 4TH OF JULY  
+                    WHEN DAY_OF_MONTH = 5 AND DAY_OF_WEEK = 2 THEN 0 -- 4TH OF JULY SUNDAY  
+                    WHEN DAY_OF_MONTH = 3 AND DAY_OF_WEEK = 6 THEN 0 -- 4TH OF JULY SATURDAY  
+                    ELSE 1 END   
+             WHEN 9 THEN   
+                 CASE WHEN DAY_OF_WEEK = 2 AND DAY_OF_MONTH <= 7 THEN 0 -- LABOR DAY  
+                     ELSE 1 END   
+            WHEN 10 THEN   
+                CASE WHEN DAY_OF_WEEK = 2 AND DAY_OF_MONTH BETWEEN 8 AND 14 THEN 0 -- COLUMBUS DAY  
+                    ELSE 1 END   
+            WHEN 11 THEN   
+                CASE WHEN DAY_OF_MONTH = 11 AND DAY_OF_WEEK BETWEEN 2 AND 6 THEN 0  -- VETERANS DAY  
+                    WHEN DAY_OF_MONTH = 12 AND DAY_OF_WEEK = 2 THEN 0 -- VETERANS DAY SUNDAY  
+                    WHEN DAY_OF_MONTH = 10 AND DAY_OF_WEEK = 6 THEN 0 -- VETERANS DAY SATURDAY  
+                    WHEN DAY_OF_WEEK = 5 AND DAY_OF_MONTH BETWEEN 22 AND 28 THEN 0 -- THANKSGIVING  
+                    ELSE 1 END   
+            WHEN 12 THEN   
+                CASE WHEN DAY_OF_MONTH = 25 AND DAY_OF_WEEK BETWEEN 2 AND 6 THEN 0 --CHRISTMAS  
+                     WHEN DAY_OF_MONTH = 26 AND DAY_OF_WEEK = 2 THEN 0 -- CHRISTMAS SUNDAY  
+                     WHEN DAY_OF_MONTH = 24 AND DAY_OF_WEEK = 6 THEN 0 -- CHRISTMAS SATURDAY  
+                     ELSE 1 END   
+            ELSE 1 END AS US_HOLIDAY_FLAG  
+            FROM DATE_DIM A ; 
+
+/* create dataview                                                     */
+/*********************************************************************************/
+/* view to pull data and dimensional attributes for cycle time and path analytics */
+/* updated 2024-04-03, B.Aldridge */
+/*********************************************************************************/
+
+create or replace view STRATEGICANALYTICS.productcapacityanalysis.MA2_DATAVIEW6(
+	SUPPLIERID,
+	FORMID,
+	SUPPLIERBILLINGREGION,
+	SUPPLIERBILLINGCOUNTRY,
+	EMPCNT,
+	ISRENEWAL,
+	WORKFLOWSTATUS,
+	WORKFLOWORDER,
+	WORKFLOWOWNER,
+	FORMWORKFLOWMESSAGEHISTORY,
+	ROWNMBR,
+	STEPDATE,
+	NEXTDATE,
+	TTLDAYSINSTEP,
+	FORMAUDITORNAME,
+	FORMTEMPLATEVERSIONID,
+	NONWORKDAYS,
+	USHOLIDAYS
+) as
+
+select    d.*
+, zeroifnull(sum(1 - c.work_day_flag)) as nonWorkdays -- sum weekends between dates
+, zeroifnull(sum(1 - c.us_holiday_flag)) as usHolidays -- sum US holidays
+from     (
+        select a.supplierID,
+            a.formID
+            /**************************************/
+            /*  need the following attributes     */
+            /*       Supplier Region              */
+            /*       Supplier user count bins     */
+            /*       New vs renewal forms         */
+            /**************************************/,
+            a.supplierBillingRegion,
+            a.supplierBillingCountry -- may not be necessary
+            /* replace following code with user count when available */
+             ,case when b.numberofemployees <= 1 then 'sole'   
+                        when b.numberofemployees <= 10 then 'small'   
+                        when b.numberofemployees <= 100 then 'medium'  
+                        when b.numberofemployees <= 500 then 'large'  
+                        when numberofemployees >500 then 'xlarge'   
+                     else 'unknown' end as empCnt   
+              ,case when fc.formisrenewalAudit  ='yes' then 'Renew'
+              when fc.formisrenewalAudit = 'No' then 'New'
+              else null end as IsRenewal
+            /*  add new vs Renewal when available */,
+            a.workflowstatus -- status of current step
+            /* split the resubmit node (5) based on prior step */
+            /*    5_3 means prior step was 3 (open requirement)*/
+            /*    5_4 means prior step was 4 (reject)          */,
+            case
+                when a.workFlowOrder = '5' then (
+                    case
+                        when lag(a.workFlowOrder, 1) over (
+                            partition by a.formID,
+                            a.supplierID
+                            order by
+                                a.formWorkflowUpdatedDate
+                        ) = '3' then workFlowOrder || '_3'
+                        when lag(workFlowOrder, 1) over (
+                            partition by a.formID,
+                            a.supplierID
+                            order by
+                                a.formWorkflowUpdatedDate
+                        ) = '4' then workFlowOrder || '_4'
+                        else a.workFlowOrder || '_0'
+                    end
+                ) -- should not get here
+                else a.WorkFlowOrder
+            end as WorkFlowOrder,
+            case when a.workflowstatus = 'Rejected' then 'Supplier' else a.workflowOwner end as WorkflowOwner,
+            --a.WorkFlowOwner,
+            a.formworkflowmessagehistory
+            /* add row number as aid in multiple resubmit cycles */,
+            row_number() over (
+                partition by a.supplierID,
+                a.formID
+                order by
+                    a.formWorkflowUpdatedDate
+            ) as rownmbr,
+            a.formworkflowupdateddate::date as stepDate,
+            lead(a.formworkflowupdateddate::date,1) over (
+                partition by a.formID,
+                a.supplierID
+                order by
+                    a.formworkflowupdateddate
+            ) as nextDate -- end of step
+,
+            CASE
+                WHEN a.WorkflowOrder = '6' THEN '0' -- step 6 is exit step, no cycle time
+                ELSE timestampdiff(
+                    second,
+                    TO_TIMESTAMP(a.formworkflowupdateddate),
+                    TO_TIMESTAMP(
+                        LEAD(a.formworkflowupdateddate, 1) OVER (
+                            partition by a.formID,
+                            a.supplierID
+                            ORDER BY
+                                TO_TIMESTAMP(a.formworkflowupdateddate)
+                        )
+                    )
+                )
+            END /86400::float AS ttldaysInStep -- keep time in days and fraction of a day
+            , fc.formauditorname
+            , fc.formtemplateversionID
+            /* the following code was provided by Avetta */
+        from
+            (
+                SELECT
+                    DISTINCT s.SupplierID,
+                    s.SupplierName,
+                    s.Supplierbillingcountry,
+                    s.Supplierbillingregion,
+                    s.Suppliernumberofemployees,
+                    fo.Formid,
+                    fo.FormName,
+                    fo.formstartdate,
+                    fo.formcreationdate,
+                    fo.formworkflowstatus,
+                    fo.formworkflowmessage,
+                    fo.FORMTEMPLATEVERSIONID,
+                    -- fo.formwaitingon,
+                    fo.formworkflowcompletiondays,
+                    fw.formworkflowstatushistory,
+                    -- Set new status for the workflow
+                    CASE
+                        WHEN fw.formworkflowstatushistory = 'Pending' THEN 'Pending'
+                        WHEN fw.formworkflowstatushistory = 'Resubmit' THEN 'Resubmit'
+                        WHEN fw.formworkflowstatushistory = 'Approved' THEN 'Approved'
+                        WHEN fw.formworkflowstatushistory = 'Submit' THEN 'Submit'
+                        WHEN fw.formworkflowstatushistory = 'Open Requirement'
+                        AND fw.formworkflowmessagehistory = 'Open Requirement: More document(s) needed' THEN 'Open Requirement'
+                        ELSE 'Rejected'
+                    END AS WorkflowStatus,
+                    --fo.formidtoformrejectionreason,
+                    --Set order for the Workflow
+                    CASE
+                        WHEN fw.formworkflowstatushistory = 'Pending' THEN '1'
+                        WHEN fw.formworkflowstatushistory = 'Submit' THEN '2'
+                        WHEN fw.formworkflowstatushistory = 'Resubmit' THEN '5'
+                        WHEN fw.formworkflowstatushistory = 'Approved' THEN '6'
+                        WHEN fw.formworkflowstatushistory = 'Open Requirement'
+                        AND fw.formworkflowmessagehistory = 'Open Requirement: More document(s) needed' THEN '3'
+                        ELSE '4'
+                    END AS WorkflowOrder,
+                    -- Workflow Owner
+                    CASE
+                        WHEN fw.formworkflowstatushistory = 'Pending' THEN 'Supplier'
+                        WHEN fw.formworkflowstatushistory = 'Submit' THEN 'Avetta'
+                        WHEN fw.formworkflowstatushistory = 'Open Requirement' THEN 'Supplier'
+                        WHEN fw.formworkflowstatushistory = 'Resubmit' THEN 'Avetta'
+                        WHEN fw.formworkflowstatushistory = 'Approved' THEN 'None'
+                    END AS WorkflowOwner,
+                    fw.formworkflowmessagehistory,
+                    --Update date format for the column of Form workflow updated date
+                    TO_CHAR(
+                        TO_TIMESTAMP(fw.formworkflowupdateddate),
+                        'YYYY-MM-DD HH24:MI:SS'
+                    ) AS FormWorkflowUpdatedDate -- number rows in workflow for convenience
+                    --, row_number() over (partition by fo.formid, fo.supplierID order by fw.formworkflowupdateddate)  as rowNmbr
+                    -- Calculate TimeInStep.
+                    /*, CASE 
+                        WHEN WorkflowOrder = '6' THEN '0' 
+                        ELSE 
+                          DATEDIFF(DAY, TO_TIMESTAMP(fw.formworkflowupdateddate),  
+                                   TO_TIMESTAMP(LEAD(fw.formworkflowupdateddate,1)  
+                                                OVER (partition by fo.formID, fo.supplierID ORDER BY TO_TIMESTAMP(fw.formworkflowupdateddate)))) 
+                      END AS TimeInStep */
+                FROM
+                    Analytics.Avetta.Client cl
+                    INNER JOIN Analytics.Avetta.Connection c ON cl.ClientID = c.ClientID
+                    JOIN Analytics.Avetta.CORPORATE co ON cl.CORPORATEID = co.CORPORATEID
+                    JOIN Analytics.Avetta.Supplier s ON c.SupplierID = S.SupplierID
+                    JOIN Analytics.Avetta.Form fo ON c.supplierid = fo.supplierid
+                    AND c.clientid = fo.clientid
+                    JOIN Analytics.Avetta.FORMWORKFLOWHISTORY fw ON fo.formid = fw.formid
+                WHERE
+                    fo.formname = 'Manual Audit' --AND s.supplierid = '250371229'
+                    -- AND fo.formstartdate >= '2023-01-01'
+                    AND fo.FORMTEMPLATEVERSIONID >= '69' --Change out AND fo.FormStartDate >= '2023-01-01'
+                    AND c.connectionstatus = 'Active'
+                    AND s.supplierstatus = 'Active' --AND fo.formisactive = 'Yes'
+                    AND fo.formworkflowoverallstatus = 'Done'
+            ) a left join ( 
+            select formID, supplierID, formisrenewalAudit, formAuditorName
+            , formtemplateversionid
+            from ANALYTICS.CLIENT.FORM 
+            group by 1,2,3,4,5
+            ) fc
+            on fc.formID = a.formID 
+            and a.supplierID = fc.supplierID 
+            /* replace with userID when available */
+            -- pull supplier number of employees when safety table is null
+            left join  (select x.supplierID 
+            , coalesce(x.globalEmployees, y.suppliernumberofemployees) as numberofemployees 
+            , safetyYear from Analytics.Avetta.Safety x  
+            join ANALYTICS.DATA.SUPPLIERCLIENTVISIBLE y 
+            on x.supplierID = y.supplierID  
+            qualify row_number() over (partition by x.supplierID order by safetyYear desc) = 1 
+            ) b 
+            on b.supplierID = a.supplierID 
+            /* Add new vs. Renewal join when available */
+    ) d 
+    /* join to calendar table for working days */
+    left join STRATEGICANALYTICS.productcapacityanalysis.ma2_DATEDIM c on c.calendar_date between d.stepdate
+    and d.nextdate 
+group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,13,14,15,16;
+
+/***********************************************************************/
+/* create Analytic tables                                 */
+/***********************************************************************/
+
+-- group table
+
+create or replace TABLE STRATEGICANALYTICS.PRODUCTCAPACITYANALYSIS.MA2_GROUP (
+	GROUPID integer,
+	GROUPDESC VARCHAR,
+	ANALYTICID integer,
+	ANALYTICDESC VARCHAR(16777216),
+	LVL1DIM VARCHAR(16777216),
+	LVL2DIM VARCHAR(16777216),
+	LVL3DIM VARCHAR(16777216),
+	LVL4DIM VARCHAR(16777216),
+	LVL5DIM VARCHAR(16777216),
+	LVL6DIM VARCHAR(16777216),
+	LVL7DIM VARCHAR(16777216),
+	LVL8DIM VARCHAR(16777216),
+	LVL9DIM VARCHAR(16777216),
+	LVL10DIM VARCHAR(16777216),
+	VALIDSTARTDATE TIMESTAMP_NTZ(0),
+	VALIDENDDATE TIMESTAMP_NTZ(0),
+	SIZERULE1 NUMBER(38,0),
+	SIZERULE2 NUMBER(38,0),
+	DEFAULTMODEL VARCHAR(16777216),
+	ACTIVEGROUP BOOLEAN,
+	ALERTIND BOOLEAN,
+	DATATABLE BOOLEAN,
+	VIEWDATABASE VARCHAR(16777216),
+	VIEWFORDIMS VARCHAR(16777216),
+	VIEWFORDATA VARCHAR(16777216),
+	VIEWFORCALCS VARCHAR(16777216),
+	VIEWFORRESULTS VARCHAR(16777216),
+	VIEWFORDATATABLE VARCHAR(16777216),
+	CREATEDBY VARCHAR(16777216),
+	CREATEDON TIMESTAMP_NTZ(0)
+);
+
+-- instance table 
+/*  The instance table is populated by the views for dimensions */
+
+create or replace TABLE STRATEGICANALYTICS.productcapacityanalysis.MA2_INSTANCE (
+	GROUPID NUMBER(38,0),
+	INSTANCEID NUMBER(38,0),
+	LVLDIM1 VARCHAR(16777216),
+	LVLDIM2 VARCHAR(16777216),
+	LVLDIM3 VARCHAR(16777216),
+	LVLDIM4 VARCHAR(16777216),
+	LVLDIM5 VARCHAR(16777216),
+	LVLDIM6 VARCHAR(16777216),
+	LVLDIM7 VARCHAR(16777216),
+	LVLDIM8 VARCHAR(16777216),
+	LVLDIM9 VARCHAR(16777216),
+	LVLDIM10 VARCHAR(16777216),
+	INSTSIZE NUMBER(38,0),
+	INSTMODEL VARCHAR(16777216),
+	CALCREQ BOOLEAN,
+	LASTCALCTS TIMESTAMP_NTZ(0)
+);
+
+-- Result tables 
+-- Cycle time results 
+
+create or replace TABLE STRATEGICANALYTICS.productcapacityanalysis.MA2_CTMODELRESULTS (
+	GROUPID NUMBER(38,0),
+	INSTANCEID NUMBER(38,0),
+	MODELID NUMBER(38,0),
+	MODELSOURCE VARCHAR(16777216),
+	BINNMBR NUMBER(38,0),
+	BINBEGIN FLOAT,
+	BINEND FLOAT,
+	CDF FLOAT,
+	CDFSTART FLOAT,
+	NMBRPOINTS NUMBER(38,0),
+	ACTIVEFLAG BOOLEAN,
+	CREATETS TIMESTAMP_NTZ(0),
+	UPDATETS TIMESTAMP_NTZ(0)
+);
+
+-- Path split results 
+
+create or replace TABLE STRATEGICANALYTICS.productCapacityAnalysis.MA2_PATHSPLITRESULTS (
+	GROUPID NUMBER(38,0),
+	INSTANCEID NUMBER(38,0),
+	INSTSIZE FLOAT,
+	TTLCNT FLOAT,
+	PCT FLOAT,
+	UPDATETS TIMESTAMP_NTZ(0)
+);
